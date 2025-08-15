@@ -17,7 +17,7 @@ const MIN_SUPPLY_FOR_DISTRIBUTION = 0.001;
 async function runSimulation() {
     try {
         // 1. Загружаем и парсим данные из CSV
-        const allData = await loadDataFromCSV('test_deficit.csv');
+        const allData = await loadDataFromCSV('input_data.csv');
 
         // 2. Группируем данные по отраслям, чтобы обрабатывать каждую отрасль отдельно
         const dataByIndustry = allData.reduce((acc, row) => {
