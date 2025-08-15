@@ -6,6 +6,8 @@ const csv = require('csv-parser');
 const RP_PARAMETR_SA = 10;
 // Порог сходимости как процент от общего спроса (0.01% по умолчанию)
 const CONVERGENCE_THRESHOLD_PERCENT = 0.0001;
+// Минимальное значение предложения для участия в распределении
+const MIN_SUPPLY_FOR_DISTRIBUTION = 0.001;
 // Объем мирового (внешнего) рынка теперь берётся из входных данных для каждой отрасли
 // (строка с k==0 содержит спрос игрока "Мир"). Резервный/по умолчанию параметр можно задать
 // через переменную окружения, но по умолчанию используем данные из CSV.
@@ -74,6 +76,126 @@ function loadDataFromCSV(filePath) {
 }
 
 /**
+ * Распределяет импорт между покупателями пропорционально их неудовлетворенному спросу
+ * @param {Array<Object>} buyers - Массив покупателей (игроки с k !== 0)
+ * @param {number} importAmount - Объем импорта для распределения
+ */
+function distributeImportToBuyers(buyers, importAmount) {
+    const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
+    
+    if (totalUnsatisfiedDemand > 0) {
+        buyers.forEach(buyer => {
+            const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
+            const buyerImportAmount = importAmount * satisfactionShare;
+            buyer.импорт_расчетный += buyerImportAmount;
+            buyer.спрос_неудовлетворенный -= buyerImportAmount;
+        });
+    }
+}
+
+/**
+ * Обрабатывает первую итерацию распределения спроса
+ * @param {Array<Object>} playersData - Данные игроков
+ * @param {number} общийСпрос - Общий внутренний спрос
+ * @returns {number} - Суммарно удовлетворенный спрос на итерации
+ */
+function processFirstIteration(playersData, общийСпрос) {
+    let worldSalesInStep = 0;
+    let realSalesInStep = 0;
+    let суммарноУдовлетвореноНаИтерации = 0;
+
+    // Распределяем спрос по всем продавцам согласно их долям
+    playersData.forEach(seller => {
+        const распределение_спроса = общийСпрос * seller.доля_идеал;
+        seller.потенциальный_внутренний_спрос += распределение_спроса;
+        const удовлНаИтерации = Math.min(распределение_спроса, seller.предложение_остаток);
+        seller.спрос_удовл_внутр += удовлНаИтерации;
+        seller.предложение_остаток -= удовлНаИтерации;
+        суммарноУдовлетвореноНаИтерации += удовлНаИтерации;
+
+        if (seller.k === 0) {
+            worldSalesInStep += удовлНаИтерации;
+        } else {
+            realSalesInStep += удовлНаИтерации;
+        }
+    });
+
+    // Распределяем импорт и обновляем неудовлетворенный спрос
+    const buyers = playersData.filter(p => p.k !== 0);
+    const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
+
+    if (totalUnsatisfiedDemand > 0) {
+        buyers.forEach(buyer => {
+            const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
+            const satisfactionFromWorld = worldSalesInStep * satisfactionShare;
+            const satisfactionFromReal = realSalesInStep * satisfactionShare;
+
+            buyer.импорт_расчетный += satisfactionFromWorld;
+            buyer.спрос_неудовлетворенный -= (satisfactionFromWorld + satisfactionFromReal);
+        });
+    }
+
+    return суммарноУдовлетвореноНаИтерации;
+}
+
+/**
+ * Обрабатывает последующие итерации распределения спроса (2+)
+ * @param {Array<Object>} playersData - Данные игроков  
+ * @param {number} остатокСпроса - Остаток спроса для распределения
+ * @returns {number} - Суммарно удовлетворенный спрос на итерации
+ */
+function processSubsequentIteration(playersData, остатокСпроса) {
+    let суммарноУдовлетвореноНаИтерации = 0;
+    const реальныеИгроки = playersData.filter(p => p.k !== 0);
+    const buyers = playersData.filter(p => p.k !== 0);
+    
+    // Определяем доли только для реальных игроков с остатком предложения
+    реальныеИгроки.forEach(p => {
+        p.доля_tm_на_итерации = p.предложение_остаток > MIN_SUPPLY_FOR_DISTRIBUTION ? p.доля_идеал : 0;
+    });
+    
+    const сумма_долей_tm_реальных = реальныеИгроки.reduce((sum, p) => sum + p.доля_tm_на_итерации, 0);
+
+    if (сумма_долей_tm_реальных > 0) {
+        // Распределяем между реальными игроками
+        let salesInStep = 0;
+        реальныеИгроки.forEach(seller => {
+            const распределение_спроса = (seller.доля_tm_на_итерации / сумма_долей_tm_реальных) * остатокСпроса;
+            seller.потенциальный_внутренний_спрос += распределение_спроса;
+            const удовлНаИтерации = Math.min(распределение_спроса, seller.предложение_остаток);
+            seller.спрос_удовл_внутр += удовлНаИтерации;
+            seller.предложение_остаток -= удовлНаИтерации;
+            salesInStep += удовлНаИтерации;
+        });
+        суммарноУдовлетвореноНаИтерации = salesInStep;
+
+        // Обновляем неудовлетворенный спрос покупателей
+        const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
+        if (totalUnsatisfiedDemand > 0) {
+            buyers.forEach(buyer => {
+                const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
+                const satisfactionFromReal = salesInStep * satisfactionShare;
+                buyer.спрос_неудовлетворенный -= satisfactionFromReal;
+            });
+        }
+    } else {
+        // Если у реальных игроков нет предложения, весь спрос идет к "Миру"
+        const мир = playersData.find(p => p.k === 0);
+        if (мир) {
+            const удовлНаИтерации = Math.min(остатокСпроса, мир.предложение_остаток);
+            мир.спрос_удовл_внутр += удовлНаИтерации;
+            мир.предложение_остаток -= удовлНаИтерации;
+            суммарноУдовлетвореноНаИтерации = удовлНаИтерации;
+
+            // Распределяем импорт от мира
+            distributeImportToBuyers(buyers, удовлНаИтерации);
+        }
+    }
+
+    return суммарноУдовлетвореноНаИтерации;
+}
+
+/**
  * Основная функция, реализующая алгоритм распределения рынка для ОДНОЙ отрасли
  * @param {Array<Object>} playersData - Данные по всем игрокам для одной отрасли
  * @returns {Array<Object>} - Данные с добавленными результатами расчетов
@@ -86,14 +208,18 @@ function simulateIndustryMarket(playersData) {
         .filter(p => p.k !== 0)
         .reduce((sum, p) => sum + p.спрос_региона, 0);
 
-    playersData.forEach(p => {
-        p.начальное_предложение = (p.k === 0) ? общийСпрос : p.валовой_выпуск;
-        p.балл_са = p.начальное_предложение > 0 ? Math.exp(RP_PARAMETR_SA * p.уровень_нтп) : 0;
+    // Расчет балла качества и идеальной доли для каждого игрока
+    playersData.forEach(player => {
+        // Начальное предложение: для "Мира" - весь внутренний спрос, для остальных - их валовой выпуск
+        player.начальное_предложение = (player.k === 0) ? общийСпрос : player.валовой_выпуск;
+        // Балл качества на основе уровня НТП (научно-технического прогресса)
+        player.балл_са = player.начальное_предложение > 0 ? Math.exp(RP_PARAMETR_SA * player.уровень_нтп) : 0;
     });
 
     const суммаБалловСА = playersData.reduce((sum, p) => sum + p.балл_са, 0);
-    playersData.forEach(p => {
-        p.доля_идеал = суммаБалловСА > 0 ? p.балл_са / суммаБалловСА : 0;
+    playersData.forEach(player => {
+        // Идеальная доля рынка на основе балла качества
+        player.доля_идеал = суммаБалловСА > 0 ? player.балл_са / суммаБалловСА : 0;
     });
 
     // --- ФАЗА 2: ИТЕРАТИВНОЕ РАСПРЕДЕЛЕНИЕ ВНУТРЕННЕГО РЫНКА ---
@@ -101,16 +227,19 @@ function simulateIndustryMarket(playersData) {
   === ФАЗА 2: Итеративное распределение (${playerCount} игроков) ===`);
     const фаза2НачалоВремени = Date.now();
     
-    playersData.forEach(p => {
-        p.предложение_остаток = p.начальное_предложение;
-        p.спрос_удовл_внутр = 0;
-        p.потенциальный_внутренний_спрос = 0; // ИЗМЕНЕНИЕ: Инициализация накопительного потенциального спроса
-        if (p.k !== 0) {
-            p.спрос_неудовлетворенный = p.спрос_региона;
-            p.импорт_расчетный = 0;
+    // Инициализация переменных для итеративного распределения
+    playersData.forEach(player => {
+        player.предложение_остаток = player.начальное_предложение;
+        player.спрос_удовл_внутр = 0;
+        player.потенциальный_внутренний_спрос = 0; // Накопительный потенциальный спрос
+        if (player.k !== 0) {
+            // Для реальных игроков
+            player.спрос_неудовлетворенный = player.спрос_региона;
+            player.импорт_расчетный = 0;
         } else {
-            p.спрос_неудовлетворенный = 0;
-            p.импорт_расчетный = 0;
+            // Для "Мира" (внешний рынок)
+            player.спрос_неудовлетворенный = 0;
+            player.импорт_расчетный = 0;
         }
     });
     let спросОстатокНаРынке = общийСпрос;
@@ -118,7 +247,8 @@ function simulateIndustryMarket(playersData) {
     let вышлиПоОстатку = false;
     let остатокПереданМиру = false;
 
-    const абсолютныйПорогСходимости = общийСпрос * CONVERGENCE_THRESHOLD_PERCENT; //Добавлен, чтобы не допустить бесконечных итераций или лишних с распределением копеек
+    // Абсолютный порог сходимости для избежания излишних итераций с минимальными суммами
+    const абсолютныйПорогСходимости = общийСпрос * CONVERGENCE_THRESHOLD_PERCENT;
 
     for (let m = 1; m <= playerCount + 1; m++) {
         выполненоИтераций = m;
@@ -131,16 +261,9 @@ function simulateIndustryMarket(playersData) {
                     мир.предложение_остаток -= спросОстатокНаРынке;
                     остатокПереданМиру = true;
 
+                    // Распределяем малый остаток импорта между покупателями
                     const buyers = playersData.filter(p => p.k !== 0);
-                    const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
-                    if (totalUnsatisfiedDemand > 0) {
-                        buyers.forEach(buyer => { 
-                            const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
-                            const importAmount = спросОстатокНаРынке * satisfactionShare;
-                            buyer.импорт_расчетный += importAmount;
-                            buyer.спрос_неудовлетворенный -= importAmount;
-                        });
-                    }
+                    distributeImportToBuyers(buyers, спросОстатокНаРынке);
                 }
                 спросОстатокНаРынке = 0;
             }
@@ -150,86 +273,13 @@ function simulateIndustryMarket(playersData) {
 
         let суммарноУдовлетвореноНаИтерации = 0;
         
+        // Выполняем итерацию в зависимости от номера
         if (m === 1) {
-            let worldSalesInStep = 0;
-            let realSalesInStep = 0;
-
-            playersData.forEach(p => { // p - продавец
-                const распределение_спроса = общийСпрос * p.доля_идеал;
-                p.потенциальный_внутренний_спрос += распределение_спроса; // ИЗМЕНЕНИЕ: Накапливаем потенциальный спрос
-                const удовлНаИтерации = Math.min(распределение_спроса, p.предложение_остаток);
-                p.спрос_удовл_внутр += удовлНаИтерации;
-                p.предложение_остаток -= удовлНаИтерации;
-                суммарноУдовлетвореноНаИтерации += удовлНаИтерации;
-
-                if (p.k === 0) {
-                    worldSalesInStep += удовлНаИтерации;
-                } else {
-                    realSalesInStep += удовлНаИтерации;
-                }
-            });
-
-            const buyers = playersData.filter(p => p.k !== 0);
-            const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
-
-            if (totalUnsatisfiedDemand > 0) {
-                buyers.forEach(buyer => {
-                    const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
-                    const satisfactionFromWorld = worldSalesInStep * satisfactionShare;
-                    const satisfactionFromReal = realSalesInStep * satisfactionShare;
-
-                    buyer.импорт_расчетный += satisfactionFromWorld;
-                    buyer.спрос_неудовлетворенный -= (satisfactionFromWorld + satisfactionFromReal);
-                });
-            }
+            // Первая итерация: распределение по идеальным долям среди всех игроков
+            суммарноУдовлетвореноНаИтерации = processFirstIteration(playersData, общийСпрос);
         } else {
-            const остатокСпросаДляПерераспределения = спросОстатокНаРынке;
-            const реальныеИгроки = playersData.filter(p => p.k !== 0);
-            реальныеИгроки.forEach(p => {
-                p.доля_tm_на_итерации = p.предложение_остаток > 0.001 ? p.доля_идеал : 0;
-            });
-            const сумма_долей_tm_реальных = реальныеИгроки.reduce((sum, p) => sum + p.доля_tm_на_итерации, 0);
-
-            const buyers = playersData.filter(p => p.k !== 0);
-            const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
-
-            if (сумма_долей_tm_реальных > 0) {
-                let salesInStep = 0;
-                реальныеИгроки.forEach(p => { // p - продавец
-                    const распределение_спроса = (p.доля_tm_на_итерации / сумма_долей_tm_реальных) * остатокСпросаДляПерераспределения;
-                    p.потенциальный_внутренний_спрос += распределение_спроса; // ИЗМЕНЕНИЕ: Накапливаем потенциальный спрос
-                    const удовлНаИтерации = Math.min(распределение_спроса, p.предложение_остаток);
-                    p.спрос_удовл_внутр += удовлНаИтерации;
-                    p.предложение_остаток -= удовлНаИтерации;
-                    salesInStep += удовлНаИтерации;
-                });
-                суммарноУдовлетвореноНаИтерации = salesInStep;
-
-                if (totalUnsatisfiedDemand > 0) {
-                    buyers.forEach(buyer => {
-                        const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
-                        const satisfactionFromReal = salesInStep * satisfactionShare;
-                        buyer.спрос_неудовлетворенный -= satisfactionFromReal;
-                    });
-                }
-            } else {
-                const мир = playersData.find(p => p.k === 0);
-                if (мир) {
-                    const удовлНаИтерации = Math.min(остатокСпросаДляПерераспределения, мир.предложение_остаток);
-                    мир.спрос_удовл_внутр += удовлНаИтерации;
-                    мир.предложение_остаток -= удовлНаИтерации;
-                    суммарноУдовлетвореноНаИтерации = удовлНаИтерации;
-
-                    if (totalUnsatisfiedDemand > 0) {
-                        buyers.forEach(buyer => {
-                            const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
-                            const importAmount = удовлНаИтерации * satisfactionShare;
-                            buyer.импорт_расчетный += importAmount;
-                            buyer.спрос_неудовлетворенный -= importAmount;
-                        });
-                    }
-                }
-            }
+            // Последующие итерации: распределение остатка только среди реальных игроков с предложением
+            суммарноУдовлетвореноНаИтерации = processSubsequentIteration(playersData, спросОстатокНаРынке);
         }
         
         спросОстатокНаРынке -= суммарноУдовлетвореноНаИтерации;
@@ -293,13 +343,13 @@ function simulateIndustryMarket(playersData) {
     });
 
     // Шаг 15: Полный спрос реализованный (итоговые продажи) и потенциальный
-    playersData.forEach(p => {
+    playersData.forEach(player => {
         // Реализованный спрос (фактические продажи в стране и на экспорт)
-        p.полный_спрос = p.экспорт + p.спрос_удовл_внутр;
+        player.полный_спрос = player.экспорт + player.спрос_удовл_внутр;
 
-        // ИЗМЕНЕНИЕ: Используем накопленный потенциальный спрос
-        const потенциальный_внешний_спрос = p.распределение_спроса_внеш;
-        p.потенциальный_полный_спрос = p.потенциальный_внутренний_спрос + потенциальный_внешний_спрос;
+        // Потенциальный полный спрос (сколько мог бы продать при неограниченном предложении)
+        const потенциальный_внешний_спрос = player.распределение_спроса_внеш;
+        player.потенциальный_полный_спрос = player.потенциальный_внутренний_спрос + потенциальный_внешний_спрос;
     });
 
     // Шаг 19: Импорт
