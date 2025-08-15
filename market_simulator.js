@@ -100,39 +100,63 @@ function distributeImportToBuyers(buyers, importAmount) {
  * @returns {number} - Суммарно удовлетворенный спрос на итерации
  */
 function processFirstIteration(playersData, общийСпрос) {
-    let worldSalesInStep = 0;
-    let realSalesInStep = 0;
     let суммарноУдовлетвореноНаИтерации = 0;
-
-    // Распределяем спрос по всем продавцам согласно их долям
+    const мир = playersData.find(p => p.k === 0);
+    const buyers = playersData.filter(p => p.k !== 0);
+    
+    // Создаем матрицу продаж: кто сколько продал кому
+    // salesMatrix[sellerK][buyerK] = объем продаж
+    const salesMatrix = {};
+    
+    // Инициализируем матрицу
     playersData.forEach(seller => {
-        const распределение_спроса = общийСпрос * seller.доля_идеал;
-        seller.потенциальный_внутренний_спрос += распределение_спроса;
-        const удовлНаИтерации = Math.min(распределение_спроса, seller.предложение_остаток);
-        seller.спрос_удовл_внутр += удовлНаИтерации;
-        seller.предложение_остаток -= удовлНаИтерации;
-        суммарноУдовлетвореноНаИтерации += удовлНаИтерации;
-
-        if (seller.k === 0) {
-            worldSalesInStep += удовлНаИтерации;
-        } else {
-            realSalesInStep += удовлНаИтерации;
-        }
+        salesMatrix[seller.k] = {};
+        buyers.forEach(buyer => {
+            salesMatrix[seller.k][buyer.k] = 0;
+        });
     });
 
-    // Распределяем импорт и обновляем неудовлетворенный спрос
-    const buyers = playersData.filter(p => p.k !== 0);
-    const totalUnsatisfiedDemand = buyers.reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
-
-    if (totalUnsatisfiedDemand > 0) {
-        buyers.forEach(buyer => {
-            const satisfactionShare = buyer.спрос_неудовлетворенный / totalUnsatisfiedDemand;
-            const satisfactionFromWorld = worldSalesInStep * satisfactionShare;
-            const satisfactionFromReal = realSalesInStep * satisfactionShare;
-
-            buyer.импорт_расчетный += satisfactionFromWorld;
-            buyer.спрос_неудовлетворенный -= (satisfactionFromWorld + satisfactionFromReal);
+    // Распределяем спрос: каждый покупатель пытается купить у каждого продавца
+    // пропорционально доле продавца
+    buyers.forEach(buyer => {
+        let остатокСпросаПокупателя = buyer.спрос_региона;
+        
+        playersData.forEach(seller => {
+            // Сколько покупатель хочет купить у этого продавца
+            const желаемаяПокупка = buyer.спрос_региона * seller.доля_идеал;
+            // Сколько продавец может продать
+            const доступноДляПродажи = Math.min(желаемаяПокупка, seller.предложение_остаток);
+            // Сколько покупатель еще может купить
+            const фактическаяПокупка = Math.min(доступноДляПродажи, остатокСпросаПокупателя);
+            
+            if (фактическаяПокупка > 0) {
+                // Регистрируем продажу
+                salesMatrix[seller.k][buyer.k] = фактическаяПокупка;
+                
+                // Обновляем состояние продавца
+                seller.спрос_удовл_внутр += фактическаяПокупка;
+                seller.предложение_остаток -= фактическаяПокупка;
+                seller.потенциальный_внутренний_спрос += желаемаяПокупка;
+                
+                // Обновляем состояние покупателя
+                остатокСпросаПокупателя -= фактическаяПокупка;
+                
+                // Если это покупка у "Мира", это импорт
+                if (seller.k === 0) {
+                    buyer.импорт_расчетный += фактическаяПокупка;
+                }
+                
+                суммарноУдовлетвореноНаИтерации += фактическаяПокупка;
+            }
         });
+        
+        // Обновляем неудовлетворенный спрос покупателя
+        buyer.спрос_неудовлетворенный = остатокСпросаПокупателя;
+    });
+    
+    // Добавляем потенциальный спрос для "Мира"
+    if (мир) {
+        мир.потенциальный_внутренний_спрос += общийСпрос * мир.доля_идеал;
     }
 
     return суммарноУдовлетвореноНаИтерации;
@@ -276,7 +300,20 @@ function simulateIndustryMarket(playersData) {
         // Выполняем итерацию в зависимости от номера
         if (m === 1) {
             // Первая итерация: распределение по идеальным долям среди всех игроков
+            console.log(`\n  --- Детали первой итерации ---`);
+            const началоСпроса = playersData.filter(p => p.k !== 0).reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
+            console.log(`  Неудовлетворенный спрос до итерации: ${началоСпроса.toFixed(2)}`);
+            
             суммарноУдовлетвореноНаИтерации = processFirstIteration(playersData, общийСпрос);
+            
+            const конецСпроса = playersData.filter(p => p.k !== 0).reduce((sum, p) => sum + p.спрос_неудовлетворенный, 0);
+            const импортВсего = playersData.filter(p => p.k !== 0).reduce((sum, p) => sum + p.импорт_расчетный, 0);
+            const мир = playersData.find(p => p.k === 0);
+            console.log(`  Продажи "Мира" на итерации: ${мир ? мир.спрос_удовл_внутр.toFixed(2) : '0.00'}`);
+            console.log(`  Импорт регионов (должен совпадать): ${импортВсего.toFixed(2)}`);
+            console.log(`  Неудовлетворенный спрос после итерации: ${конецСпроса.toFixed(2)}`);
+            console.log(`  Удовлетворено на итерации всего: ${суммарноУдовлетвореноНаИтерации.toFixed(2)}`);
+            console.log(`  -------------------------------`);
         } else {
             // Последующие итерации: распределение остатка только среди реальных игроков с предложением
             суммарноУдовлетвореноНаИтерации = processSubsequentIteration(playersData, спросОстатокНаРынке);
